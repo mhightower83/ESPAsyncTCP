@@ -24,6 +24,16 @@
 #include "cbuf.h"
 
 
+#if !LWIP_NETIF_TX_SINGLE_PBUF
+/*
+  Without LWIP_NETIF_TX_SINGLE_PBUF, all tcp_writes default to "no copy".
+  Referenced data must be preserved and free-ed from the specified tcp_sent()
+  callback. Alternative, tcp_writes need to use the TCP_WRITE_FLAG_COPY
+  attribute.
+*/
+#pragma message("WARNING: LWIP_NETIF_TX_SINGLE_PBUF is not set.")
+#endif
+
 SyncClient::SyncClient(size_t txBufLen)
   : _client(NULL)
   , _tx_buffer(NULL)
