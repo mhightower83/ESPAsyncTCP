@@ -61,7 +61,6 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
 #endif
   , _pcb_sent_at(0)
   , _close_pcb(false)
-  , _close_err(ERR_OK)
   , _ack_pcb(true)
   , _tx_unacked_len(0)
   , _tx_acked_len(0)
@@ -70,6 +69,7 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
   , _rx_since_timeout(0)
   , _ack_timeout(ASYNC_MAX_ACK_TIME)
   , _connect_port(0)
+  , _close_err(ERR_OK)
   , prev(NULL)
   , next(NULL)
 {
@@ -134,8 +134,8 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port){
 #endif
   tcp_arg(pcb, this);
   tcp_err(pcb, &_s_error);
-  tcp_connect(pcb, &addr, port,(tcp_connected_fn)&_s_connected);
-  return true;
+  size_t err = tcp_connect(pcb, &addr, port,(tcp_connected_fn)&_s_connected);
+  return (ERR_OK == err); //true;
 }
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -197,6 +197,9 @@ bool AsyncClient::operator==(const AsyncClient &other) {
 }
 
 int8_t AsyncClient::abort(){
+  // Should we allow an abort on a successful close, ERR_OK.
+  // Will the stack send a FIN followed by a RST. Needs verification.
+  // I think that is frowned upon.
   if(_pcb) {
     if(_close_err != ERR_ABRT){
       tcp_abort(_pcb);
@@ -293,6 +296,7 @@ size_t AsyncClient::ack(size_t len){
 // Private Callbacks
 
 err_t AsyncClient::_connected(void* pcb, err_t err){
+  (void)err; // LWIP v1.4 appears to always call with ERR_OK
   _pcb = reinterpret_cast<tcp_pcb*>(pcb);
   if(_pcb){
     _pcb_busy = false;
@@ -370,6 +374,7 @@ void AsyncClient::_ssl_error(int8_t err){
 #endif
 
 err_t AsyncClient::_sent(tcp_pcb* pcb, uint16_t len) {
+  (void)pcb;
   _rx_last_packet = millis();
   ASYNC_TCP_DEBUG("_sent: %u\n", len);
   _tx_unacked_len -= len;
@@ -384,6 +389,7 @@ err_t AsyncClient::_sent(tcp_pcb* pcb, uint16_t len) {
 }
 
 err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
+  (void)err; // LWIP v1.4 appears to always call with ERR_OK
   if(pb == NULL){
     ASYNC_TCP_DEBUG("_recv: pb == NULL! Closing... %d\n", err);
     return _close();
@@ -431,6 +437,7 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
 }
 
 err_t AsyncClient::_poll(tcp_pcb* pcb){
+  (void)pcb;
   // Close requested
   if(_close_pcb){
     _close_pcb = false;
@@ -490,6 +497,7 @@ void AsyncClient::_s_dns_found(const char *name, ip_addr_t *ipaddr, void *arg){
 #else
 void AsyncClient::_s_dns_found(const char *name, const ip_addr *ipaddr, void *arg){
 #endif
+  (void)name;
   reinterpret_cast<AsyncClient*>(arg)->_dns_found(ipaddr);
 }
 
@@ -936,19 +944,21 @@ uint8_t AsyncServer::status(){
     return 0;
   return _pcb->state;
 }
+
 void  AsyncServer::refuse(err_t err){
   _connect_err = err;
 }
-void AsyncServer::refuse(AsyncClient c){
-  if (_refuse_cb && c) {
-    _refuse_cb = NULL;    // Don't want to be called again from the distructor
-    _connect_err = c->getCloseErr();
-    if (_close_err != ERR_ABRT)
-      _connect_err = c->abort();
+void AsyncServer::refuse(AsyncClient *c){
+  if (c && c->isAcceptErrSet()) {
+    c->onAcceptErr(NULL, 0);
+    _got_client = false;
+    _connect_err = c->abort();
     // Caller is responsible for freeing AsyncClient (delete c)
   }
 }
 err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
+  (void)err; // LWIP v1.4 appears to always call with ERR_OK
+  (void)pcb;
   if(_connect_cb){
 #if ASYNC_TCP_SSL_ENABLED
     if (_noDelay || _ssl_ctx)
@@ -1006,8 +1016,9 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
       if(c){
         _connect_err = ERR_OK;
         _got_client = true;
-        c->onAcceptErr([this](void * arg, AsyncClient *c, err_t err){
-          refuse(err); _got_client=false;}, 0);
+        c->onAcceptErr(
+          [this](void * arg, AsyncClient *c, err_t err){
+            (void)arg; (void)err; refuse(c);}, 0);
         _connect_cb(_connect_cb_arg, c);
         if(_got_client) c->onAcceptErr(NULL, 0);
         return _connect_err;

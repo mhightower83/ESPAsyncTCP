@@ -200,6 +200,7 @@ class AsyncClient {
     void onPacket(AcPacketHandler cb, void* arg = 0);       //data received
     void onTimeout(AcTimeoutHandler cb, void* arg = 0);     //ack timeout
     void onPoll(AcConnectHandler cb, void* arg = 0);        //every 125ms when connected
+    void onAcceptErr(AcErrorHandler cb, void* arg);         //used internalaly to catch ERR_ABRT
 
     void ackPacket(struct pbuf * pb);
 
@@ -208,6 +209,7 @@ class AsyncClient {
 
     err_t _recv(tcp_pcb* pcb, pbuf* pb, err_t err);
     err_t getCloseErr(void){ return _close_err;}
+    bool isAcceptErrSet(void){ return (_refuse_cb != NULL);}
 };
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -247,9 +249,8 @@ class AsyncServer {
     void setNoDelay(bool nodelay);
     bool getNoDelay();
     uint8_t status();
-    void refuse(AsyncClient c);
+    void refuse(AsyncClient *c);
     void refuse(err_t err);
-
 
   protected:
     err_t _accept(tcp_pcb* newpcb, err_t err);
