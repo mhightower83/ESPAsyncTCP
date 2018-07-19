@@ -62,6 +62,8 @@ class AsyncClient {
     void* _connect_cb_arg;
     AcConnectHandler _discard_cb;
     void* _discard_cb_arg;
+    AcErrorHandler _refuse_cb;
+    void* _refuse_cb_arg;
     AcAckHandler _sent_cb;
     void* _sent_cb_arg;
     AcErrorHandler _error_cb;
@@ -90,6 +92,7 @@ class AsyncClient {
     uint32_t _rx_since_timeout;
     uint32_t _ack_timeout;
     uint16_t _connect_port;
+    err_t _close_err;
 
     int8_t _close();
     err_t _connected(void* pcb, err_t err);
@@ -204,6 +207,7 @@ class AsyncClient {
     const char * stateToString();
 
     err_t _recv(tcp_pcb* pcb, pbuf* pb, err_t err);
+    err_t getCloseErr(void){ return _close_err;}
 };
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -225,6 +229,8 @@ class AsyncServer {
     AcSSlFileHandler _file_cb;
     void* _file_cb_arg;
 #endif
+    bool _got_client;
+    err_t _connect_err;
 
   public:
 
@@ -241,6 +247,9 @@ class AsyncServer {
     void setNoDelay(bool nodelay);
     bool getNoDelay();
     uint8_t status();
+    void refuse(AsyncClient c);
+    void refuse(err_t err);
+
 
   protected:
     err_t _accept(tcp_pcb* newpcb, err_t err);

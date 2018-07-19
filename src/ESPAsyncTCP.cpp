@@ -61,6 +61,7 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
 #endif
   , _pcb_sent_at(0)
   , _close_pcb(false)
+  , _close_err(ERR_OK)
   , _ack_pcb(true)
   , _tx_unacked_len(0)
   , _tx_acked_len(0)
@@ -102,6 +103,9 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
 AsyncClient::~AsyncClient(){
   if(_pcb)
     _close();
+
+  if(_refuse_cb)
+    _refuse_cb(_refuse_cb_arg, this, _close_err );
 }
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -194,10 +198,13 @@ bool AsyncClient::operator==(const AsyncClient &other) {
 
 int8_t AsyncClient::abort(){
   if(_pcb) {
-    tcp_abort(_pcb);
+    if(_close_err != ERR_ABRT){
+      tcp_abort(_pcb);
+      _close_err = ERR_ABRT;
+    }
     _pcb = NULL;
   }
-  return ERR_ABRT;
+  return _close_err; //ERR_ABRT;
 }
 
 void AsyncClient::close(bool now){
@@ -314,8 +321,8 @@ err_t AsyncClient::_connected(void* pcb, err_t err){
   return ERR_OK;
 }
 
-int8_t AsyncClient::_close(){
-  int8_t err = ERR_OK;
+err_t AsyncClient::_close(){
+  err_t err = ERR_OK;
   if(_pcb) {
 #if ASYNC_TCP_SSL_ENABLED
     if(_pcb_secure){
@@ -331,6 +338,7 @@ int8_t AsyncClient::_close(){
     if(err != ERR_OK) {
       err = abort();
     }
+    _close_err = err;
     _pcb = NULL;
     if(_discard_cb)
       _discard_cb(_discard_cb_arg, this);
@@ -372,7 +380,7 @@ err_t AsyncClient::_sent(tcp_pcb* pcb, uint16_t len) {
       _sent_cb(_sent_cb_arg, this, _tx_acked_len, (millis() - _pcb_sent_at));
       _tx_acked_len = 0;
   }
-  return ERR_OK;
+  return _close_err; //ERR_OK;
 }
 
 err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
@@ -391,7 +399,7 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
         ASYNC_TCP_DEBUG("_recv err: %d\n", read_bytes);
         _close();
       }
-      return read_bytes;
+      return (_close_err == ERR_ABRT) ? ERR_ABRT : read_bytes;
     }
     return ERR_OK;
   }
@@ -406,8 +414,12 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
     if(_pb_cb){
       _pb_cb(_pb_cb_arg, this, b);
     } else {
-      if(_recv_cb)
-        _recv_cb(_recv_cb_arg, this, b->payload, b->len);
+      if(_close_err != ERR_ABRT){
+        if (_recv_cb)
+          _recv_cb(_recv_cb_arg, this, b->payload, b->len);
+        if (_close_err == ERR_ABRT)
+          _ack_pcb = false;
+      }
       if(!_ack_pcb)
         _rx_ack_len += b->len;
       else
@@ -415,7 +427,7 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
       pbuf_free(b);
     }
   }
-  return ERR_OK;
+  return _close_err; //ERR_OK;
 }
 
 err_t AsyncClient::_poll(tcp_pcb* pcb){
@@ -423,7 +435,7 @@ err_t AsyncClient::_poll(tcp_pcb* pcb){
   if(_close_pcb){
     _close_pcb = false;
     _close();
-    return ERR_OK;
+    return _close_err; //ERR_OK;
   }
   uint32_t now = millis();
 
@@ -432,24 +444,25 @@ err_t AsyncClient::_poll(tcp_pcb* pcb){
     _pcb_busy = false;
     if(_timeout_cb)
       _timeout_cb(_timeout_cb_arg, this, (now - _pcb_sent_at));
-    return ERR_OK;
+    return _close_err;
+
   }
   // RX Timeout
   if(_rx_since_timeout && (now - _rx_last_packet) >= (_rx_since_timeout * 1000)){
     _close();
-    return ERR_OK;
+    return _close_err; //ERR_OK;
   }
 #if ASYNC_TCP_SSL_ENABLED
   // SSL Handshake Timeout
   if(_pcb_secure && !_handshake_done && (now - _rx_last_packet) >= 2000){
     _close();
-    return ERR_OK;
+    return _close_err; //ERR_OK;
   }
 #endif
   // Everything is fine
   if(_poll_cb)
     _poll_cb(_poll_cb_arg, this);
-  return ERR_OK;
+  return _close_err; //ERR_OK;
 }
 
 #if LWIP_VERSION_MAJOR == 1
@@ -687,6 +700,11 @@ void AsyncClient::onError(AcErrorHandler cb, void* arg){
   _error_cb_arg = arg;
 }
 
+void AsyncClient::onAcceptErr(AcErrorHandler cb, void* arg){
+  _refuse_cb = cb;
+  _refuse_cb_arg = arg;
+}
+
 void AsyncClient::onData(AcDataHandler cb, void* arg){
   _recv_cb = cb;
   _recv_cb_arg = arg;
@@ -847,7 +865,7 @@ void AsyncServer::begin(){
   ip_addr_t local_addr;
   local_addr.addr = (uint32_t) _addr;
   err = tcp_bind(pcb, &local_addr, _port);
-
+  // Failures are ERR_ISCONN or ERR_USE
   if (err != ERR_OK) {
     tcp_close(pcb);
     return;
@@ -918,7 +936,18 @@ uint8_t AsyncServer::status(){
     return 0;
   return _pcb->state;
 }
-
+void  AsyncServer::refuse(err_t err){
+  _connect_err = err;
+}
+void AsyncServer::refuse(AsyncClient c){
+  if (_refuse_cb && c) {
+    _refuse_cb = NULL;    // Don't want to be called again from the distructor
+    _connect_err = c->getCloseErr();
+    if (_close_err != ERR_ABRT)
+      _connect_err = c->abort();
+    // Caller is responsible for freeing AsyncClient (delete c)
+  }
+}
 err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
   if(_connect_cb){
 #if ASYNC_TCP_SSL_ENABLED
@@ -939,6 +968,7 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
           ASYNC_TCP_DEBUG("### malloc new pending failed!\n");
           if(tcp_close(pcb) != ERR_OK){
             tcp_abort(pcb);
+            return ERR_ABRT;
           }
           return ERR_OK;
         }
@@ -974,8 +1004,13 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
       AsyncClient *c = new AsyncClient(pcb);
 #endif
       if(c){
+        _connect_err = ERR_OK;
+        _got_client = true;
+        c->onAcceptErr([this](void * arg, AsyncClient *c, err_t err){
+          refuse(err); _got_client=false;}, 0);
         _connect_cb(_connect_cb_arg, c);
-        return ERR_OK;
+        if(_got_client) c->onAcceptErr(NULL, 0);
+        return _connect_err;
       }
 #if ASYNC_TCP_SSL_ENABLED
     }
