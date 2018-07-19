@@ -339,17 +339,13 @@ int8_t AsyncClient::_close(){
 }
 
 void AsyncClient::_error(err_t err) {
+
   if(_pcb){
 #if ASYNC_TCP_SSL_ENABLED
     if(_pcb_secure){
       tcp_ssl_free(_pcb);
     }
 #endif
-    tcp_arg(_pcb, NULL);
-    tcp_sent(_pcb, NULL);
-    tcp_recv(_pcb, NULL);
-    tcp_err(_pcb, NULL);
-    tcp_poll(_pcb, NULL, 0);
     _pcb = NULL;
   }
   if(_error_cb)
@@ -987,6 +983,7 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
   }
   if(tcp_close(pcb) != ERR_OK){
     tcp_abort(pcb);
+    return ERR_ABRT;
   }
   return ERR_OK;
 }
@@ -1044,8 +1041,11 @@ err_t AsyncServer::_recv(struct tcp_pcb *pcb, struct pbuf *pb, err_t err){
       pbuf_free(p->pb);
     }
     free(p);
-    tcp_close(pcb);
-    tcp_abort(pcb);
+    size_t err = tcp_close(pcb);
+    if (err != ERR_OK) {
+      tcp_abort(pcb);
+      return ERR_ABRT;
+    }
   } else {
     ASYNC_TCP_DEBUG("### wait _recv: %u %d\n", pb->tot_len, _clients_waiting);
     p = _pending;

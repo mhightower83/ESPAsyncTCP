@@ -29,18 +29,29 @@ SyncClient::SyncClient(size_t txBufLen)
   , _tx_buffer(NULL)
   , _tx_buffer_size(txBufLen)
   , _rx_buffer(NULL)
-{}
+  , _ref(NULL)
+{
+  ref();
+}
 
 SyncClient::SyncClient(AsyncClient *client, size_t txBufLen)
   : _client(client)
   , _tx_buffer(new cbuf(txBufLen))
   , _tx_buffer_size(txBufLen)
   , _rx_buffer(NULL)
+  , _ref(NULL)
 {
-  _attachCallbacks();
+  ref();
+  if(_client) // Added NULL check before call. SEP 30 2017 - mjh
+    _attachCallbacks();
 }
 
-SyncClient::~SyncClient(){
+void SyncClient::_release(){
+  if(_client != NULL){
+    _client->abort();
+    _client->free();
+    _client = NULL;
+  }
   if(_tx_buffer != NULL){
     cbuf *b = _tx_buffer;
     _tx_buffer = NULL;
@@ -53,6 +64,30 @@ SyncClient::~SyncClient(){
   }
 }
 
+void SyncClient::ref() {
+  if (_ref == NULL) {
+    _ref = new size_t;
+    *_ref = 0;
+  }
+  ++*_ref;
+}
+
+size_t SyncClient::unref() {
+  size_t count = 0;
+  if (_ref) {
+    count = --*_ref;
+    if (0 == count) {
+      delete _ref;
+      _ref = NULL;
+    }
+  }
+  return count;
+}
+
+SyncClient::~SyncClient(){
+  if (0 == unref())
+    _release();
+}
 #if ASYNC_TCP_SSL_ENABLED
 int SyncClient::connect(IPAddress ip, uint16_t port, bool secure){
 #else
@@ -97,7 +132,40 @@ int SyncClient::connect(const char *host, uint16_t port){
   }
   return 0;
 }
+#if 1
+SyncClient & SyncClient::operator=(const SyncClient &other){
+  size_t *rhsref = other._ref;
+  ++*rhsref; // Just in case the left and right size are the same object with different containers
+  if (0 == unref())
+    _release();
+  _ref = other._ref;
+  ref();
+  --*rhsref;
 
+ // I am not convensed that this is safe - if the left side and the right side are
+ // separate copies of the same object they can get out of sync. And leaks may happen.
+ // If they reference the same object everything is OK.
+ //
+ // I am thinking that SyncClient needs to be encapsulated in a holding object that
+ // uses a pointer to SyncClient so that all network actions go against a single object.
+ // Event when performed from multiple holding objects.
+
+  _tx_buffer_size = other._tx_buffer_size;
+  _tx_buffer = other._tx_buffer;
+  _client = other._client;
+  if (_client != NULL && _tx_buffer == NULL)
+    _tx_buffer = new cbuf(_tx_buffer_size);
+
+  // This operation must be atomic - cannot have callback on receive while transfering
+  // the rx buffer before callbacks are updated.
+  ets_intr_lock();
+    _rx_buffer = other._rx_buffer;
+    if(_client)
+      _attachCallbacks();
+  ets_intr_unlock();
+  return *this;
+}
+#else
 SyncClient & SyncClient::operator=(const SyncClient &other){
   if(_client != NULL){
     _client->abort();
@@ -115,11 +183,19 @@ SyncClient & SyncClient::operator=(const SyncClient &other){
     _rx_buffer = b->next;
     delete b;
   }
+  if(other._client != NULL) //Added
   _tx_buffer = new cbuf(other._tx_buffer_size);
   _client = other._client;
-  _attachCallbacks();
+
+  if(_client) // Added NULL check before call. SEP 30 2017 - mjh
+    _attachCallbacks();
+  if (_client) {
+    Serial.println("SyncClient & SyncClient::operator=(const SyncClient &other); - called");
+    Serial.flush();
+  }
   return *this;
 }
+#endif
 
 void SyncClient::setTimeout(uint32_t seconds){
   if(_client != NULL)
