@@ -151,7 +151,7 @@ class AsyncClient {
 #endif
     void close(bool now = false);
     void stop();
-    int8_t abort();
+    size_t abort();
     bool free();
 
     bool canSend();//ack is not pending
