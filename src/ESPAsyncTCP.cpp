@@ -31,6 +31,7 @@ extern "C"{
 }
 #include <tcp_axtls.h>
 
+static err_t _ephemeral_close_err;
 /*
   Async TCP Client
 */
@@ -105,7 +106,7 @@ AsyncClient::~AsyncClient(){
     _close();
 
   if(_refuse_cb)
-    _refuse_cb(_refuse_cb_arg, this, _close_err );
+    _refuse_cb(_refuse_cb_arg, this, _ephemeral_close_err );
 }
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -196,7 +197,7 @@ bool AsyncClient::operator==(const AsyncClient &other) {
   return (_pcb != NULL && other._pcb != NULL && (_pcb->remote_ip.addr == other._pcb->remote_ip.addr) && (_pcb->remote_port == other._pcb->remote_port));
 }
 
-int8_t AsyncClient::abort(){
+err_t AsyncClient::abort(){
   // Should we allow an abort on a successful close, ERR_OK.
   // Will the stack send a FIN followed by a RST. Needs verification.
   // I think that is frowned upon.
@@ -342,7 +343,7 @@ err_t AsyncClient::_close(){
     if(err != ERR_OK) {
       err = abort();
     }
-    _close_err = err;
+    _ephemeral_close_err = err;
     _pcb = NULL;
     if(_discard_cb)
       _discard_cb(_discard_cb_arg, this);
@@ -381,11 +382,18 @@ err_t AsyncClient::_sent(tcp_pcb* pcb, uint16_t len) {
   _tx_acked_len += len;
   if(_tx_unacked_len == 0){
     _pcb_busy = false;
+    // _close() not safe to call from _sendt_cb()
+    // If AsynClient is free-ed, I fear we may crash on
+    // return at _tx_acked_len reference. Okay - this should work.
+    _ephemeral_close_err = ERR_OK;
     if(_sent_cb)
       _sent_cb(_sent_cb_arg, this, _tx_acked_len, (millis() - _pcb_sent_at));
-      _tx_acked_len = 0;
+    if(_ephemeral_close_err == ERR_ABRT)
+      return ERR_ABRT;
+
+    _tx_acked_len = 0;
   }
-  return _close_err; //ERR_OK;
+  return ERR_OK;
 }
 
 err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
@@ -394,6 +402,7 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
     ASYNC_TCP_DEBUG("_recv: pb == NULL! Closing... %d\n", err);
     return _close();
   }
+  _ephemeral_close_err = ERR_OK;
 
   _rx_last_packet = millis();
 #if ASYNC_TCP_SSL_ENABLED
@@ -405,7 +414,7 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
         ASYNC_TCP_DEBUG("_recv err: %d\n", read_bytes);
         _close();
       }
-      return (_close_err == ERR_ABRT) ? ERR_ABRT : read_bytes;
+      return (_ephemeral_close_err == ERR_ABRT) ? ERR_ABRT : read_bytes;
     }
     return ERR_OK;
   }
@@ -420,20 +429,20 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
     if(_pb_cb){
       _pb_cb(_pb_cb_arg, this, b);
     } else {
-      if(_close_err != ERR_ABRT){
+      if (_ephemeral_close_err != ERR_ABRT){
         if (_recv_cb)
           _recv_cb(_recv_cb_arg, this, b->payload, b->len);
-        if (_close_err == ERR_ABRT)
-          _ack_pcb = false;
+          if (_ephemeral_close_err != ERR_ABRT){
+            if(!_ack_pcb)
+              _rx_ack_len += b->len;
+            else
+              tcp_recved(pcb, b->len);
+          }
       }
-      if(!_ack_pcb)
-        _rx_ack_len += b->len;
-      else
-        tcp_recved(pcb, b->len);
       pbuf_free(b);
     }
   }
-  return _close_err; //ERR_OK;
+  return _ephemeral_close_err; //ERR_OK;
 }
 
 err_t AsyncClient::_poll(tcp_pcb* pcb){
@@ -441,35 +450,34 @@ err_t AsyncClient::_poll(tcp_pcb* pcb){
   // Close requested
   if(_close_pcb){
     _close_pcb = false;
-    _close();
-    return _close_err; //ERR_OK;
+    return _close(); //ERR_OK;
   }
   uint32_t now = millis();
 
   // ACK Timeout
   if(_pcb_busy && _ack_timeout && (now - _pcb_sent_at) >= _ack_timeout){
     _pcb_busy = false;
+    _ephemeral_close_err = ERR_OK;
     if(_timeout_cb)
       _timeout_cb(_timeout_cb_arg, this, (now - _pcb_sent_at));
-    return _close_err;
+    return _ephemeral_close_err;
 
   }
   // RX Timeout
   if(_rx_since_timeout && (now - _rx_last_packet) >= (_rx_since_timeout * 1000)){
-    _close();
-    return _close_err; //ERR_OK;
+    return _close(); //ERR_OK;
   }
 #if ASYNC_TCP_SSL_ENABLED
   // SSL Handshake Timeout
   if(_pcb_secure && !_handshake_done && (now - _rx_last_packet) >= 2000){
-    _close();
-    return _close_err; //ERR_OK;
+    return _close(); //ERR_OK;
   }
 #endif
   // Everything is fine
+  _ephemeral_close_err = ERR_OK;
   if(_poll_cb)
     _poll_cb(_poll_cb_arg, this);
-  return _close_err; //ERR_OK;
+  return _ephemeral_close_err; //ERR_OK;
 }
 
 #if LWIP_VERSION_MAJOR == 1
@@ -945,9 +953,9 @@ uint8_t AsyncServer::status(){
   return _pcb->state;
 }
 
-void  AsyncServer::refuse(err_t err){
-  _connect_err = err;
-}
+// void  AsyncServer::refuse(err_t err){
+//   _connect_err = err;
+// }
 void AsyncServer::refuse(AsyncClient *c){
   if (c && c->isAcceptErrSet()) {
     c->onAcceptErr(NULL, 0);

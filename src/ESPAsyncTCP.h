@@ -94,7 +94,7 @@ class AsyncClient {
     uint16_t _connect_port;
     err_t _close_err;
 
-    int8_t _close();
+    err_t _close();
     err_t _connected(void* pcb, err_t err);
     void _error(err_t err);
 #if ASYNC_TCP_SSL_ENABLED
