@@ -202,13 +202,11 @@ err_t AsyncClient::abort(){
   // Will the stack send a FIN followed by a RST. Needs verification.
   // I think that is frowned upon.
   if(_pcb) {
-    if(_close_err != ERR_ABRT){
-      tcp_abort(_pcb);
-      _close_err = ERR_ABRT;
-    }
+    tcp_abort(_pcb);
+    _ephemeral_close_err = ERR_ABRT;
     _pcb = NULL;
   }
-  return _close_err; //ERR_ABRT;
+  return ERR_ABRT;
 }
 
 void AsyncClient::close(bool now){
