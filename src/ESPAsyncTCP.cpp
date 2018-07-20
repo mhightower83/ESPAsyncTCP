@@ -70,7 +70,6 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
   , _rx_since_timeout(0)
   , _ack_timeout(ASYNC_MAX_ACK_TIME)
   , _connect_port(0)
-  , _close_err(ERR_OK)
   , prev(NULL)
   , next(NULL)
 {
@@ -236,13 +235,20 @@ size_t AsyncClient::write(const char* data) {
 }
 
 size_t AsyncClient::write(const char* data, size_t size, uint8_t apiflags) {
-  size_t will_send = add(data, size, apiflags);
+  size_t will_send = _add(data, size, apiflags);
+  if((apiflags & TCP_WRITE_FLAG_MORE))
+    return will_send;
+
   if(!will_send || !send())
     return 0;
   return will_send;
 }
 
 size_t AsyncClient::add(const char* data, size_t size, uint8_t apiflags) {
+  return _add(data, size, (apiflags | TCP_WRITE_FLAG_MORE));
+}
+
+size_t AsyncClient::_add(const char* data, size_t size, uint8_t apiflags) {
   if(!_pcb || size == 0 || data == NULL)
     return 0;
   size_t room = space();
@@ -400,9 +406,8 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
     ASYNC_TCP_DEBUG("_recv: pb == NULL! Closing... %d\n", err);
     return _close();
   }
-  _ephemeral_close_err = ERR_OK;
-
   _rx_last_packet = millis();
+  _ephemeral_close_err = ERR_OK;
 #if ASYNC_TCP_SSL_ENABLED
   if(_pcb_secure){
     ASYNC_TCP_DEBUG("_recv: %d\n", pb->tot_len);
@@ -428,14 +433,16 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
       _pb_cb(_pb_cb_arg, this, b);
     } else {
       if (_ephemeral_close_err != ERR_ABRT){
-        if (_recv_cb)
+        if (_recv_cb) {
+          _recv_pbuf = b;
           _recv_cb(_recv_cb_arg, this, b->payload, b->len);
-          if (_ephemeral_close_err != ERR_ABRT){
-            if(!_ack_pcb)
-              _rx_ack_len += b->len;
-            else
-              tcp_recved(pcb, b->len);
-          }
+        }
+        if (_ephemeral_close_err != ERR_ABRT){
+          if(!_ack_pcb)
+            _rx_ack_len += b->len;
+          else
+            tcp_recved(pcb, b->len);
+        }
       }
       pbuf_free(b);
     }

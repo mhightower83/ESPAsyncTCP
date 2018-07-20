@@ -92,7 +92,7 @@ class AsyncClient {
     uint32_t _rx_since_timeout;
     uint32_t _ack_timeout;
     uint16_t _connect_port;
-    err_t _close_err;
+    pbuf *_recv_pbuf;
 
     err_t _close();
     err_t _connected(void* pcb, err_t err);
@@ -122,6 +122,7 @@ class AsyncClient {
     static void _s_handshake(void *arg, struct tcp_pcb *tcp, SSL *ssl);
     static void _s_ssl_error(void *arg, struct tcp_pcb *tcp, int8_t err);
 #endif
+size_t _add(const char* data, size_t size, uint8_t apiflags);
 
   public:
     AsyncClient* prev;
@@ -160,6 +161,7 @@ class AsyncClient {
     bool send();//send all data added with the method above
     size_t ack(size_t len); //ack data that you have not acked using the method below
     void ackLater(){ _ack_pcb = false; } //will not ack the current packet. Call from onData
+    bool pbufFlagPush(){ return (!!(_recv_pbuf->flags & PBUF_FLAG_PUSH)); }
 
 #if ASYNC_TCP_SSL_ENABLED
     SSL *getSSL();
@@ -208,7 +210,6 @@ class AsyncClient {
     const char * stateToString();
 
     err_t _recv(tcp_pcb* pcb, pbuf* pb, err_t err);
-    err_t getCloseErr(void){ return _close_err;}
     bool isAcceptErrSet(void){ return (_refuse_cb != NULL);}
 };
 
