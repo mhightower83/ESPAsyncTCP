@@ -66,6 +66,7 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
   , _tx_unacked_len(0)
   , _tx_acked_len(0)
   , _tx_unsent_len(0)
+  , _rx_ack_len(0)
   , _rx_last_packet(0)
   , _rx_since_timeout(0)
   , _ack_timeout(ASYNC_MAX_ACK_TIME)
@@ -438,10 +439,18 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
           _recv_cb(_recv_cb_arg, this, b->payload, b->len);
         }
         if (_ephemeral_close_err != ERR_ABRT){
+#if 0
+          _rx_ack_len += b->len;
+          if(_ack_pcb) {
+            tcp_recved(pcb, _rx_ack_len);
+            _rx_ack_len = 0;
+          }
+#else
           if(!_ack_pcb)
             _rx_ack_len += b->len;
           else
             tcp_recved(pcb, b->len);
+#endif
         }
       }
       pbuf_free(b);
