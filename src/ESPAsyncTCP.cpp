@@ -391,7 +391,8 @@ err_t AsyncClient::_sent(tcp_pcb* pcb, uint16_t len) {
     _pcb_busy = false;
     // _close() not safe to call from _sendt_cb()
     // If AsynClient is free-ed, I fear we may crash on
-    // return at _tx_acked_len reference. Okay - this should work.
+    // return at _tx_acked_len reference.
+    // Okay - this change should handle it.
     _ephemeral_close_err = ERR_OK;
     if(_sent_cb)
       _sent_cb(_sent_cb_arg, this, _tx_acked_len, (millis() - _pcb_sent_at));
@@ -441,18 +442,10 @@ err_t AsyncClient::_recv(tcp_pcb* pcb, pbuf* pb, err_t err) {
           _recv_cb(_recv_cb_arg, this, b->payload, b->len);
         }
         if (_ephemeral_close_err != ERR_ABRT){
-#if 0
-          _rx_ack_len += b->len;
-          if(_ack_pcb) {
-            tcp_recved(pcb, _rx_ack_len);
-            _rx_ack_len = 0;
-          }
-#else
           if(!_ack_pcb)
             _rx_ack_len += b->len;
           else
             tcp_recved(pcb, b->len);
-#endif
         }
       }
       pbuf_free(b);
