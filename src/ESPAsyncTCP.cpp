@@ -55,6 +55,8 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
   , _pb_cb_arg(0)
   , _timeout_cb(0)
   , _timeout_cb_arg(0)
+  , _poll_cb(0)
+  , _poll_cb_arg(0)
   , _pcb_busy(false)
 #if ASYNC_TCP_SSL_ENABLED
   , _pcb_secure(false)
