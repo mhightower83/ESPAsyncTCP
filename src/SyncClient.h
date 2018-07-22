@@ -42,7 +42,7 @@ class SyncClient: public Client {
     void _attachCallbacks_Disconnect();
     void _attachCallbacks_AfterConnected();
 
-    size_t *_ref;
+    int *_ref;
     void _release();
 
 //D    void _zap() {_client=NULL; _tx_buffer=NULL; _rx_buffer=NULL;} //Added to help debug problem with mallco corruption - SEP 30 2017 - mjh
@@ -51,8 +51,8 @@ class SyncClient: public Client {
     SyncClient(size_t txBufLen = 1460);
     SyncClient(AsyncClient *client, size_t txBufLen = 1460);
     virtual ~SyncClient();
-    void ref();
-    size_t unref();
+    int ref();
+    int unref();
 
     operator bool(){ return connected(); }
     SyncClient & operator=(const SyncClient &other);

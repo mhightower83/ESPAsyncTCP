@@ -51,8 +51,7 @@ SyncClient::SyncClient(AsyncClient *client, size_t txBufLen)
   , _rx_buffer(NULL)
   , _ref(NULL)
 {
-  ref();
-  if(_client) // Added NULL check before call. SEP 30 2017 - mjh
+  if(ref() > 0 && _client != NULL) // Added NULL check before call. SEP 30 2017 - mjh
     _attachCallbacks();
 }
 
@@ -73,7 +72,30 @@ void SyncClient::_release(){
     delete b;
   }
 }
+#if 1
+int SyncClient::ref(){
+  if(_ref == NULL){
+    _ref = new int;
+    if(_ref != NULL)
+      *_ref = 0;
+    else
+      return -1;
+  }
+  return (++*_ref);
+}
 
+int SyncClient::unref(){
+  int count = -1;
+  if (_ref != NULL) {
+    count = --*_ref;
+    if (0 == count) {
+      delete _ref;
+      _ref = NULL;
+    }
+  }
+  return count;
+}
+#else
 void SyncClient::ref() {
   if (_ref == NULL) {
     _ref = new size_t;
@@ -93,7 +115,7 @@ size_t SyncClient::unref() {
   }
   return count;
 }
-
+#endif
 SyncClient::~SyncClient(){
   if (0 == unref())
     _release();
@@ -103,9 +125,15 @@ int SyncClient::connect(IPAddress ip, uint16_t port, bool secure){
 #else
 int SyncClient::connect(IPAddress ip, uint16_t port){
 #endif
-  if(_client != NULL && connected())
-    return 0;
+  if(_client != NULL){
+    if(connected())
+      return 0;
+    else
+      delete _client;
+  }
   _client = new AsyncClient();
+  if (_client == NULL)
+    return 0;
   _client->onConnect([](void *obj, AsyncClient *c){ ((SyncClient*)(obj))->_onConnect(c); }, this);
   _attachCallbacks_Disconnect();
 #if ASYNC_TCP_SSL_ENABLED
@@ -125,10 +153,15 @@ int SyncClient::connect(const char *host, uint16_t port, bool secure){
 #else
 int SyncClient::connect(const char *host, uint16_t port){
 #endif
-  if(_client != NULL && connected()){
-    return 0;
+  if(_client != NULL){
+    if(connected())
+      return 0;
+    else
+      delete _client;
   }
   _client = new AsyncClient();
+  if (_client == NULL)
+    return 0;
   _client->onConnect([](void *obj, AsyncClient *c){ ((SyncClient*)(obj))->_onConnect(c); }, this);
   _attachCallbacks_Disconnect();
 #if ASYNC_TCP_SSL_ENABLED
@@ -144,7 +177,10 @@ int SyncClient::connect(const char *host, uint16_t port){
 }
 #if 1
 SyncClient & SyncClient::operator=(const SyncClient &other){
-  size_t *rhsref = other._ref;
+  //mjh - This can be simplified. Fear of a callback while processing should
+  // not happen in this cooperative yield construct. Since we are not calling
+  // on services that would call yield, we should be safe!?
+  int *rhsref = other._ref;
   ++*rhsref; // Just in case the left and right size are the same object with different containers
   if (0 == unref())
     _release();
@@ -235,6 +271,8 @@ size_t SyncClient::_sendBuffer(){
   if(sendable < available)
     available= sendable;
   char *out = new char[available];
+  if(out == NULL)
+    return 0;
   _tx_buffer->read(out, available);
   size_t sent = _client->write(out, available);
   delete[] out;
@@ -254,6 +292,10 @@ void SyncClient::_onData(void *data, size_t len){
         p = p->next;
       p->next = b;
     }
+  } else {
+    // This fail causes lost receive data.
+    // Abort connection to avoid corruption.
+    _client->abort();
   }
 }
 
@@ -285,9 +327,9 @@ void SyncClient::_attachCallbacks(){
 }
 
 void SyncClient::_attachCallbacks_AfterConnected(){
-  _client->onAck([](void *obj, AsyncClient* c, size_t len, uint32_t time){ ((SyncClient*)(obj))->_sendBuffer(); }, this);
-  _client->onData([](void *obj, AsyncClient* c, void *data, size_t len){ ((SyncClient*)(obj))->_onData(data, len); }, this);
-  _client->onTimeout([](void *obj, AsyncClient* c, uint32_t time){ c->close(); }, this);
+  _client->onAck([](void *obj, AsyncClient* c, size_t len, uint32_t time){ (void)c; (void)len; (void)time; ((SyncClient*)(obj))->_sendBuffer(); }, this);
+  _client->onData([](void *obj, AsyncClient* c, void *data, size_t len){ (void)c; ((SyncClient*)(obj))->_onData(data, len); }, this);
+  _client->onTimeout([](void *obj, AsyncClient* c, uint32_t time){ (void)obj; (void)time; c->close(); }, this);
 }
 
 void SyncClient::_attachCallbacks_Disconnect(){
