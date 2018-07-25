@@ -36,6 +36,8 @@ static err_t _ephemeral_close_err;
   Async TCP Client
 */
 
+#define DEFAULT_TCP_PRIO TCP_PRIO_NORMAL //TCP_PRIO_MIN
+
 #if ASYNC_TCP_SSL_ENABLED
 AsyncClient::AsyncClient(tcp_pcb* pcb, SSL_CTX * ssl_ctx):
 #else
@@ -79,7 +81,7 @@ AsyncClient::AsyncClient(tcp_pcb* pcb):
   _pcb = pcb;
   if(_pcb){
     _rx_last_packet = millis();
-    tcp_setprio(_pcb, TCP_PRIO_MIN);
+    tcp_setprio(_pcb, DEFAULT_TCP_PRIO);
     tcp_arg(_pcb, this);
     tcp_recv(_pcb, &_s_recv);
     tcp_sent(_pcb, &_s_sent);
@@ -131,6 +133,7 @@ bool AsyncClient::connect(IPAddress ip, uint16_t port){
     return false;
   }
 
+  tcp_setprio(pcb, DEFAULT_TCP_PRIO);
 #if ASYNC_TCP_SSL_ENABLED
   _pcb_secure = secure;
   _handshake_done = !secure;
@@ -172,7 +175,7 @@ AsyncClient& AsyncClient::operator=(const AsyncClient& other){
   _pcb = other._pcb;
   if (_pcb) {
     _rx_last_packet = millis();
-    tcp_setprio(_pcb, TCP_PRIO_MIN);
+    tcp_setprio(_pcb, DEFAULT_TCP_PRIO);
     tcp_arg(_pcb, this);
     tcp_recv(_pcb, &_s_recv);
     tcp_sent(_pcb, &_s_sent);
@@ -309,7 +312,7 @@ err_t AsyncClient::_connected(void* pcb, err_t err){
   if(_pcb){
     _pcb_busy = false;
     _rx_last_packet = millis();
-    tcp_setprio(_pcb, TCP_PRIO_MIN);
+    tcp_setprio(_pcb, DEFAULT_TCP_PRIO);
     tcp_recv(_pcb, &_s_recv);
     tcp_sent(_pcb, &_s_sent);
     tcp_poll(_pcb, &_s_poll, 1);
@@ -887,6 +890,7 @@ void AsyncServer::begin(){
     return;
   }
 
+  tcp_setprio(pcb, DEFAULT_TCP_PRIO);
   ip_addr_t local_addr;
   local_addr.addr = (uint32_t) _addr;
   err = tcp_bind(pcb, &local_addr, _port);
@@ -1003,7 +1007,7 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
         new_item->pcb = pcb;
         new_item->pb = NULL;
         new_item->next = NULL;
-        tcp_setprio(_pcb, TCP_PRIO_MIN);
+        tcp_setprio(_pcb, DEFAULT_TCP_PRIO);
         tcp_arg(pcb, this);
         tcp_poll(pcb, &_s_poll, 1);
         tcp_recv(pcb, &_s_recv);
