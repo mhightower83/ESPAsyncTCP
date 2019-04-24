@@ -27,6 +27,10 @@
 class cbuf;
 class AsyncClient;
 
+#ifndef CONST
+#define CONST
+#endif
+
 class SyncClient: public Client {
   private:
     AsyncClient *_client;
@@ -48,8 +52,8 @@ class SyncClient: public Client {
 //D    void _zap() {_client=NULL; _tx_buffer=NULL; _rx_buffer=NULL;} //Added to help debug problem with mallco corruption - SEP 30 2017 - mjh
 
   public:
-    SyncClient(size_t txBufLen = 1460);
-    SyncClient(AsyncClient *client, size_t txBufLen = 1460);
+    SyncClient(size_t txBufLen = TCP_MSS);
+    SyncClient(AsyncClient *client, size_t txBufLen = TCP_MSS);
     virtual ~SyncClient();
     int ref();
     int unref();
@@ -58,23 +62,37 @@ class SyncClient: public Client {
     SyncClient & operator=(const SyncClient &other);
 
 #if ASYNC_TCP_SSL_ENABLED
-    int connect(IPAddress ip, uint16_t port, bool secure);
+    int connect(CONST IPAddress& ip, uint16_t port, bool secure);
     int connect(const char *host, uint16_t port, bool secure);
-    int connect(IPAddress ip, uint16_t port){
+    int connect(CONST IPAddress& ip, uint16_t port){
       return connect(ip, port, false);
     }
     int connect(const char *host, uint16_t port){
       return connect(host, port, false);
     }
 #else
+#ifdef ARDUINO_ESP8266_RELEASE_2_5_0
+    int connect(CONST IPAddress& ip, uint16_t port);
+#else
     int connect(IPAddress ip, uint16_t port);
+#endif
     int connect(const char *host, uint16_t port);
 #endif
     void setTimeout(uint32_t seconds);
 
     uint8_t status();
     uint8_t connected();
-    void stop();
+
+//#ifdef ARDUINO_ESP8266_RELEASE_2_5_0
+// #if 1 //LWIP_IPV6_NUM_ADDRESSES == 0
+    bool stop(unsigned int maxWaitMs);
+    bool flush(unsigned int maxWaitMs);
+    void stop() { (void)stop(0);}
+    void flush() { (void)flush(0);}
+// #else
+//     bool stop(unsigned int maxWaitMs = 0);
+//     bool flush(unsigned int maxWaitMs = 0);
+// #endif
 
     size_t write(uint8_t data);
     size_t write(const uint8_t *data, size_t len);
@@ -83,7 +101,8 @@ class SyncClient: public Client {
     int peek();
     int read();
     int read(uint8_t *data, size_t len);
-    void flush();
+
+
 };
 
 #endif /* SYNCCLIENT_H_ */

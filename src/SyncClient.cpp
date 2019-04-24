@@ -18,11 +18,17 @@
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
-#include "SyncClient.h"
+// #include "SyncClient.h"
+// #include "Arduino.h"
+// #include "ESPAsyncTCP.h"
+
 #include "Arduino.h"
 #include "ESPAsyncTCP.h"
-#include "cbuf.h"
+#include "SyncClient.h"
 
+
+#include "cbuf.h"
+#include <interrupts.h>
 
 #if !LWIP_NETIF_TX_SINGLE_PBUF
 /*
@@ -121,9 +127,13 @@ SyncClient::~SyncClient(){
     _release();
 }
 #if ASYNC_TCP_SSL_ENABLED
-int SyncClient::connect(IPAddress ip, uint16_t port, bool secure){
+int SyncClient::connect(CONST IPAddress& ip, uint16_t port, bool secure){
+#else
+#ifdef ARDUINO_ESP8266_RELEASE_2_5_0
+int SyncClient::connect(CONST IPAddress& ip, uint16_t port){
 #else
 int SyncClient::connect(IPAddress ip, uint16_t port){
+#endif
 #endif
   if(_client != NULL){
     if(connected())
@@ -204,11 +214,14 @@ SyncClient & SyncClient::operator=(const SyncClient &other){
 
   // This operation must be atomic - cannot have callback on receive while transfering
   // the rx buffer before callbacks are updated.
-  ets_intr_lock();
+  // ets_intr_lock();
+  {
+    AutoInterruptLock(15);
     _rx_buffer = other._rx_buffer;
     if(_client)
       _attachCallbacks();
-  ets_intr_unlock();
+  }
+  // ets_intr_unlock();
   return *this;
 }
 #else
@@ -258,9 +271,12 @@ uint8_t SyncClient::connected(){
   return (_client != NULL && _client->connected());
 }
 
-void SyncClient::stop(){
+//void SyncClient::stop(){
+bool SyncClient::stop(unsigned int maxWaitMs){
+  (void)maxWaitMs;
   if(_client != NULL)
     _client->close(true);
+  return true;
 }
 
 size_t SyncClient::_sendBuffer(){
@@ -297,6 +313,7 @@ void SyncClient::_onData(void *data, size_t len){
   } else {
     // This fail causes lost receive data.
     // Abort connection to avoid corruption.
+    //?? callbacks maybe called - guess that is good ?? = mjh
     _client->abort();
   }
 }
@@ -407,14 +424,19 @@ int SyncClient::read(){
   return res;
 }
 
-void SyncClient::flush(){
+// #if LWIP_IPV6_NUM_ADDRESSES == 0
+// bool SyncClient::_flush(unsigned int maxWaitMs){
+// #else
+bool SyncClient::flush(unsigned int maxWaitMs){
+// #endif
   if(_tx_buffer == NULL || !connected())
-    return;
+    return false;
   if(_tx_buffer->available()){
     while(_client != NULL && !_client->canSend() && connected())
       delay(0);
     if(_client == NULL || _tx_buffer == NULL)
-      return;
+      return false;
     _sendBuffer();
   }
+  return true;
 }
