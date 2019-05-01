@@ -30,15 +30,13 @@
 #include "cbuf.h"
 #include <interrupts.h>
 
-#if !LWIP_NETIF_TX_SINGLE_PBUF
 /*
   Without LWIP_NETIF_TX_SINGLE_PBUF, all tcp_writes default to "no copy".
   Referenced data must be preserved and free-ed from the specified tcp_sent()
   callback. Alternative, tcp_writes need to use the TCP_WRITE_FLAG_COPY
   attribute.
 */
-#pragma message("WARNING: LWIP_NETIF_TX_SINGLE_PBUF is not set.")
-#endif
+static_assert(LWIP_NETIF_TX_SINGLE_PBUF, "Required, tcp_write() must always copy.");
 
 SyncClient::SyncClient(size_t txBufLen)
   : _client(NULL)
@@ -311,8 +309,10 @@ void SyncClient::_onData(void *data, size_t len){
       p->next = b;
     }
   } else {
-    // This fail causes lost receive data.
-    // Abort connection to avoid corruption.
+    // We ran out of memory. This fail causes lost receive data.
+    // The connection should be closed in a manner that conveys something
+    // bad/abnormal has happened to the connection. Hence, we abort the
+    // connection to avoid possible data corruption.
     //?? callbacks maybe called - guess that is good ?? = mjh
     _client->abort();
   }

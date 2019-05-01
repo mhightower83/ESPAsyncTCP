@@ -33,12 +33,14 @@ extern "C" {
     #include "lwip/pbuf.h"
 };
 
+// Needed for Arduino core releases prior to 2.5.0, because of changes
+// made to accommodate Arduino core 2.5.0
 #ifndef CONST
 #define CONST
 #endif
 
 class AsyncClient;
-class AsyncClientCloseAbort;
+class ACErrorTracker;
 
 #define ASYNC_MAX_ACK_TIME 5000
 #define ASYNC_WRITE_FLAG_COPY 0x01 //will allocate new buffer to hold the data while sending (else will hold reference to the data given)
@@ -59,11 +61,10 @@ typedef std::function<void(void*, AsyncClient*, err_t error)> AcErrorHandler;
 typedef std::function<void(void*, AsyncClient*, void *data, size_t len)> AcDataHandler;
 typedef std::function<void(void*, AsyncClient*, struct pbuf *pb)> AcPacketHandler;
 typedef std::function<void(void*, AsyncClient*, uint32_t time)> AcTimeoutHandler;
-
 typedef std::function<void(void*, size_t event)> AsNotifyHandler;
 
 enum error_events {
-  EE_OK,
+  EE_OK = 0,
   EE_ABORTED,       // Callback or foreground aborted connections
   EE_ERROR_CB,      // Stack initiated aborts via error Callbacks.
   EE_CONNECTED_CB,
@@ -72,67 +73,76 @@ enum error_events {
   EE_MAX
 };
 
-class AsyncClientCloseAbort {
+class ACErrorTracker {
+  // Assumption: callbacks are never called with err == ERR_ABRT; however,
+  // they may return ERR_ABRT.
   protected:
-    // friend class AsyncClient;
     AsyncClient *_client;
-    err_t _close_err;
-    int _aborted;
+    err_t _close_error;
+    int _errored;
     AsNotifyHandler _error_event_cb;
     void* _error_event_cb_arg;
 
   public:
-    AsyncClientCloseAbort(AsyncClient *c):
+    ACErrorTracker(AsyncClient *c):
         _client(c)
-      , _close_err(ERR_OK)
-      , _aborted(EE_OK)
+      , _close_error(ERR_OK)
+      , _errored(EE_OK)
       , _error_event_cb(NULL)
       , _error_event_cb_arg(NULL)
     {}
 
-    // void notifyErrorCB(size_t errorEvent) {
-    //   if (_error_event_cb)
-    //     _error_event_cb(_error_event_cb_arg, errorEvent);
-    // }
+    /**
+     * This is not necessary, but a start at gathering some statistics on
+     * errored out connections. Used from AsyncServer.
+     */
     void onErrorEvent(AsNotifyHandler cb, void *arg) {
       _error_event_cb = cb;
       _error_event_cb_arg = arg;
     }
 
-    void setCloseErr(err_t e) {
-      if(_aborted == EE_OK)
-        _close_err = e;
+    void setCloseError(err_t e) {
+      if(_errored == EE_OK)
+        _close_error = e;
     }
-    err_t getCloseErr(void) const {
-      return _close_err;
+    err_t getCloseError(void) const {
+      return _close_error;
     }
-    void setAborted(size_t errorEvent) {
-      if(EE_OK == _aborted) _aborted = errorEvent;
-      // notifyErrorCB(errorEvent);
+    /**
+     * Called mainly by callback routines, called when err is not ERR_OK.
+     * This prevents the possiblity of aborting an already errored out
+     * connection.
+     */
+    void setErrored(size_t errorEvent) {
+      if(EE_OK == _errored)
+        _errored = errorEvent;
       if (_error_event_cb)
         _error_event_cb(_error_event_cb_arg, errorEvent);
     }
-    err_t getCBCloseErr(void) {
-      if (EE_OK != _aborted) return ERR_OK;
-      if (ERR_ABRT == _close_err) {
-        setAborted(EE_ABORTED);
-      }
-      return _close_err;
+    /* *
+     * Used by callback functions only. Used for proper ERR_ABRT return value
+     * reporting. ERR_ABRT is only reported/returned once; thereafter ERR_OK
+     * is always returned.
+     */
+    err_t getCallbackCloseError(void) {
+      if (EE_OK != _errored)
+        return ERR_OK;
+      if (ERR_ABRT == _close_error)
+        setErrored(EE_ABORTED);
+      return _close_error;
     }
 
     void closed(void) {
-      if (_client) {
+      if (_client)
         _client = NULL;
-      }
     }
-    bool gotClient(void) const { return (_client != NULL);}
-    ~AsyncClientCloseAbort() {}
+    bool hasClient(void) const { return (_client != NULL);}
+    ~ACErrorTracker() {}
 };
 
 class AsyncClient {
   protected:
     friend class AsyncTCPbuffer;
-    // friend class AsyncClientCloseAbort;
     tcp_pcb* _pcb;
     AcConnectHandler _connect_cb;
     void* _connect_cb_arg;
@@ -166,18 +176,17 @@ class AsyncClient {
     uint32_t _rx_since_timeout;
     uint32_t _ack_timeout;
     uint16_t _connect_port;
-    pbuf *_recv_pbuf;
-    std::shared_ptr<AsyncClientCloseAbort> _closeAbortState;
-    // int _in_callback;
+    u8_t _recv_pbuf_flags;
+    std::shared_ptr<ACErrorTracker> _errorTacker;
 
     void _close();
-    void _connected(std::shared_ptr<AsyncClientCloseAbort>& closeAbort, void* pcb, err_t err);
+    void _connected(std::shared_ptr<ACErrorTracker>& closeAbort, void* pcb, err_t err);
     void _error(err_t err);
 #if ASYNC_TCP_SSL_ENABLED
     void _ssl_error(int8_t err);
 #endif
-    void _poll(tcp_pcb* pcb);
-    void _sent(std::shared_ptr<AsyncClientCloseAbort>& closeAbort, tcp_pcb* pcb, uint16_t len);
+    void _poll(std::shared_ptr<ACErrorTracker>& closeAbort, tcp_pcb* pcb);
+    void _sent(std::shared_ptr<ACErrorTracker>& closeAbort, tcp_pcb* pcb, uint16_t len);
 #if LWIP_VERSION_MAJOR == 1
     void _dns_found(struct ip_addr *ipaddr);
 #else
@@ -198,7 +207,6 @@ class AsyncClient {
     static void _s_handshake(void *arg, struct tcp_pcb *tcp, SSL *ssl);
     static void _s_ssl_error(void *arg, struct tcp_pcb *tcp, int8_t err);
 #endif
-size_t _add(const char* data, size_t size, uint8_t apiflags);
 
   public:
     AsyncClient* prev;
@@ -237,7 +245,7 @@ size_t _add(const char* data, size_t size, uint8_t apiflags);
     bool send();//send all data added with the method above
     size_t ack(size_t len); //ack data that you have not acked using the method below
     void ackLater(){ _ack_pcb = false; } //will not ack the current packet. Call from onData
-    bool pbufFlagPush(){ return (!!(_recv_pbuf->flags & PBUF_FLAG_PUSH)); }
+    bool isRecvPush(){ return !!(_recv_pbuf_flags & PBUF_FLAG_PUSH); }
 
 #if ASYNC_TCP_SSL_ENABLED
     SSL *getSSL();
@@ -278,17 +286,15 @@ size_t _add(const char* data, size_t size, uint8_t apiflags);
     void onPacket(AcPacketHandler cb, void* arg = 0);       //data received
     void onTimeout(AcTimeoutHandler cb, void* arg = 0);     //ack timeout
     void onPoll(AcConnectHandler cb, void* arg = 0);        //every 125ms when connected
-    void onAcceptErr(AcErrorHandler cb, void* arg);         //used internalaly to catch ERR_ABRT
-
     void ackPacket(struct pbuf * pb);
 
     const char * errorToString(int8_t error);
     const char * stateToString();
 
-    void _recv(std::shared_ptr<AsyncClientCloseAbort>& closeAbort, tcp_pcb* pcb, pbuf* pb, err_t err);
-    void setCloseErr(err_t e) const { _closeAbortState->setCloseErr(e);}
-    err_t getCloseErr(void) const { return _closeAbortState->getCloseErr();}
-    std::shared_ptr<AsyncClientCloseAbort> getACCloseAbort(void) const { return _closeAbortState; };
+    void _recv(std::shared_ptr<ACErrorTracker>& closeAbort, tcp_pcb* pcb, pbuf* pb, err_t err);
+    void setCloseError(err_t e) const { _errorTacker->setCloseError(e);}
+    err_t getCloseError(void) const { return _errorTacker->getCloseError();}
+    std::shared_ptr<ACErrorTracker> getACErrorTracker(void) const { return _errorTacker; };
 };
 
 #if ASYNC_TCP_SSL_ENABLED
