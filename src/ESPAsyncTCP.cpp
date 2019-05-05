@@ -32,6 +32,64 @@ extern "C"{
 #include <tcp_axtls.h>
 
 /*
+  Async Client Error Return Tracker
+*/
+// Assumption: callbacks are never called with err == ERR_ABRT; however,
+// they may return ERR_ABRT.
+
+ACErrorTracker::ACErrorTracker(AsyncClient *c):
+    _client(c)
+  , _close_error(ERR_OK)
+  , _errored(EE_OK)
+#ifdef DEBUG_MORE
+  , _error_event_cb(NULL)
+  , _error_event_cb_arg(NULL)
+#endif
+{}
+
+#ifdef DEBUG_MORE
+/**
+ * This is not necessary, but a start at gathering some statistics on
+ * errored out connections. Used from AsyncServer.
+ */
+void ACErrorTracker::onErrorEvent(AsNotifyHandler cb, void *arg) {
+  _error_event_cb = cb;
+  _error_event_cb_arg = arg;
+}
+#endif
+
+void ACErrorTracker::setCloseError(err_t e) {
+ASYNC_TCP_DEBUG("setCloseError() to: %s(%ld)\n", _client->errorToString(e), e);
+  if(_errored == EE_OK)
+    _close_error = e;
+}
+/**
+ * Called mainly by callback routines, called when err is not ERR_OK.
+ * This prevents the possiblity of aborting an already errored out
+ * connection.
+ */
+void ACErrorTracker::setErrored(size_t errorEvent){
+  if(EE_OK == _errored)
+    _errored = errorEvent;
+#ifdef DEBUG_MORE
+  if (_error_event_cb)
+    _error_event_cb(_error_event_cb_arg, errorEvent);
+#endif
+}
+/**
+ * Used by callback functions only. Used for proper ERR_ABRT return value
+ * reporting. ERR_ABRT is only reported/returned once; thereafter ERR_OK
+ * is always returned.
+ */
+err_t ACErrorTracker::getCallbackCloseError(void){
+  if (EE_OK != _errored)
+    return ERR_OK;
+  if (ERR_ABRT == _close_error)
+    setErrored(EE_ABORTED);
+  return _close_error;
+}
+
+/*
   Async TCP Client
 */
 
@@ -110,7 +168,7 @@ AsyncClient::~AsyncClient(){
   if(_pcb)
     _close();
 
-  _errorTacker->closed();
+  _errorTacker->clearClient();
 }
 
 inline void clearRawTcpCallbacks(tcp_pcb* pcb){
@@ -345,6 +403,7 @@ void AsyncClient::_connected(std::shared_ptr<ACErrorTracker>& errorTracker, void
     _pcb = reinterpret_cast<tcp_pcb*>(pcb);
     if (_pcb)
       clearRawTcpCallbacks(_pcb);
+    _pcb = NULL;
     _error(err);
     return;
   }
@@ -460,7 +519,29 @@ void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
     _pcb = pcb;
     if(_pcb)
       clearRawTcpCallbacks(_pcb);
-    _error(err); // Note, this call will also handle setting _pcb to NULL.
+    _pcb = NULL;
+    // I think we are safe from being called from an interrupt context.
+    // Best Hint that calling _error() is safe:
+    //    https://www.nongnu.org/lwip/2_1_x/group__lwip__nosys.html
+    // "Feed incoming packets to netif->input(pbuf, netif) function from
+    // mainloop, not from interrupt context. You can allocate a Packet buffers
+    // (PBUF) in interrupt context and put them into a queue which is processed
+    // from mainloop."
+    // And the description of "Mainloop Mode" option 2:
+    //    https://www.nongnu.org/lwip/2_1_x/pitfalls.html
+    // "2) Run lwIP in a mainloop. ... lwIP is ONLY called from mainloop
+    // callstacks here. The ethernet IRQ has to put received telegrams into a
+    // queue which is polled in the mainloop. Ensure lwIP is NEVER called from
+    // an interrupt, ...!"
+    // Based on these comments I am thinking tcp_recv_fn() is called
+    // from somebody's mainloop(), which could only have been reached from a
+    // delay like function or the Arduino sketch loop() function has returned.
+    // What I don't want is for the client sketch to delete the AsyncClient
+    // object via _error() while it is in the middle of using it. However,
+    // the client sketch must always test for connection gone at loop() entry
+    // and the after the return of any function call that may have done a
+    // delay() or yield().
+    _error(err);
     return;
   }
 
@@ -502,7 +583,7 @@ void AsyncClient::_recv(std::shared_ptr<ACErrorTracker>& errorTracker, tcp_pcb* 
     pbuf *b = pb;
     pb = b->next;
     b->next = NULL;
-    ASYNC_TCP_DEBUG("_recv: %d\n", b->len);
+    ASYNC_TCP_DEBUG("_recv: %d%s\n", b->len, (b->flags&PBUF_FLAG_PUSH)?", PBUF_FLAG_PUSH":"");
     if(_pb_cb){
       _pb_cb(_pb_cb_arg, this, b);
     } else {
@@ -578,7 +659,7 @@ void AsyncClient::_dns_found(const ip_addr *ipaddr){
   }
 }
 
-// lWIP Callbacks
+// lwIP Callbacks
 #if LWIP_VERSION_MAJOR == 1
 void AsyncClient::_s_dns_found(const char *name, ip_addr_t *ipaddr, void *arg){
 #else
@@ -592,14 +673,14 @@ err_t AsyncClient::_s_poll(void *arg, struct tcp_pcb *tpcb) {
   AsyncClient *c = reinterpret_cast<AsyncClient*>(arg);
   std::shared_ptr<ACErrorTracker>errorTracker = c->getACErrorTracker();
   c->_poll(errorTracker, tpcb);
-  return errorTracker->getCallbackCloseError();;
+  return errorTracker->getCallbackCloseError();
 }
 
 err_t AsyncClient::_s_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *pb, err_t err) {
   AsyncClient *c = reinterpret_cast<AsyncClient*>(arg);
   auto errorTracker = c->getACErrorTracker();
   c->_recv(errorTracker, tpcb, pb, err);
-  return errorTracker->getCallbackCloseError();;
+  return errorTracker->getCallbackCloseError();
 }
 
 void AsyncClient::_s_error(void *arg, err_t err) {
@@ -614,14 +695,14 @@ err_t AsyncClient::_s_sent(void *arg, struct tcp_pcb *tpcb, uint16_t len) {
   AsyncClient *c = reinterpret_cast<AsyncClient*>(arg);
   auto errorTracker = c->getACErrorTracker();
   c->_sent(errorTracker, tpcb, len);
-  return errorTracker->getCallbackCloseError();;
+  return errorTracker->getCallbackCloseError();
 }
 
 err_t AsyncClient::_s_connected(void* arg, void* tpcb, err_t err){
   AsyncClient *c = reinterpret_cast<AsyncClient*>(arg);
   auto errorTracker = c->getACErrorTracker();
   c->_connected(errorTracker, tpcb, err);
-  return errorTracker->getCallbackCloseError();;
+  return errorTracker->getCallbackCloseError();
 }
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -863,7 +944,7 @@ void AsyncClient::ackPacket(struct pbuf * pb){
   pbuf_free(pb);
 }
 
-const char * AsyncClient::errorToString(int8_t error) {
+const char * AsyncClient::errorToString(err_t error) {
   switch (error) {
     case ERR_OK:         return "No error, everything OK";
     case ERR_MEM:        return "Out of memory error";
@@ -879,7 +960,7 @@ const char * AsyncClient::errorToString(int8_t error) {
     case ERR_CONN:       return "Not connected";
     case ERR_ARG:        return "Illegal argument";
     case ERR_USE:        return "Address in use";
-#ifdef ARDUINO_ESP8266_RELEASE_2_5_0
+#if defined(LWIP_VERSION_MAJOR) && (LWIP_VERSION_MAJOR > 1)
     case ERR_ALREADY:    return "Already connectioning";
 #endif
     case ERR_IF:         return "Low-level netif error";
@@ -929,8 +1010,10 @@ AsyncServer::AsyncServer(IPAddress addr, uint16_t port)
   , _file_cb_arg(0)
 #endif
 {
+#ifdef DEBUG_MORE
   for (size_t i=0; i<EE_MAX; ++i)
     _event_count[i] = 0;
+#endif
 }
 
 AsyncServer::AsyncServer(uint16_t port)
@@ -947,8 +1030,10 @@ AsyncServer::AsyncServer(uint16_t port)
   , _file_cb_arg(0)
 #endif
   {
+#ifdef DEBUG_MORE
     for (size_t i=0; i<EE_MAX; ++i)
       _event_count[i] = 0;
+#endif
   }
 
 AsyncServer::~AsyncServer(){
@@ -1064,7 +1149,9 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
     if(ERR_ABRT == err){ // Remove this before the PR
       ASYNC_TCP_DEBUG("_connected: ***** Unexpected err: %ld\n", err);
     }
+#ifdef DEBUG_MORE
     incEventCount(EE_ACCEPT_CB);
+#endif
     return ERR_OK;
   }
 
@@ -1124,11 +1211,13 @@ err_t AsyncServer::_accept(tcp_pcb* pcb, err_t err){
 
       if(c){
         auto errorTracker = c->getACErrorTracker();
+#ifdef DEBUG_MORE
         errorTracker->onErrorEvent(
           [](void *obj, size_t ee){ ((AsyncServer*)(obj))->incEventCount(ee); },
           this);
+#endif
         _connect_cb(_connect_cb_arg, c);
-        return errorTracker->getCallbackCloseError();;
+        return errorTracker->getCallbackCloseError();
       }
 #if ASYNC_TCP_SSL_ENABLED
     }

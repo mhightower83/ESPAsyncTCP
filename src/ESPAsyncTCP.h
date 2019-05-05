@@ -33,13 +33,8 @@ extern "C" {
     #include "lwip/pbuf.h"
 };
 
-// Needed for Arduino core releases prior to 2.5.0, because of changes
-// made to accommodate Arduino core 2.5.0
-#ifndef CONST
-#define CONST
-#endif
-
 class AsyncClient;
+class AsyncServer;
 class ACErrorTracker;
 
 #define ASYNC_MAX_ACK_TIME 5000
@@ -72,77 +67,39 @@ enum error_events {
   EE_ACCEPT_CB,
   EE_MAX
 };
-
+// #define DEBUG_MORE 1
 class ACErrorTracker {
-  // Assumption: callbacks are never called with err == ERR_ABRT; however,
-  // they may return ERR_ABRT.
-  protected:
+  private:
     AsyncClient *_client;
     err_t _close_error;
     int _errored;
+#ifdef DEBUG_MORE
     AsNotifyHandler _error_event_cb;
     void* _error_event_cb_arg;
+#endif
+
+  protected:
+    friend class AsyncClient;
+    friend class AsyncServer;
+#ifdef DEBUG_MORE
+    void onErrorEvent(AsNotifyHandler cb, void *arg);
+#endif
+    void setCloseError(err_t e);
+    void setErrored(size_t errorEvent);
+    err_t getCallbackCloseError(void);
+    void clearClient(void){ if (_client) _client = NULL;}
 
   public:
-    ACErrorTracker(AsyncClient *c):
-        _client(c)
-      , _close_error(ERR_OK)
-      , _errored(EE_OK)
-      , _error_event_cb(NULL)
-      , _error_event_cb_arg(NULL)
-    {}
-
-    /**
-     * This is not necessary, but a start at gathering some statistics on
-     * errored out connections. Used from AsyncServer.
-     */
-    void onErrorEvent(AsNotifyHandler cb, void *arg) {
-      _error_event_cb = cb;
-      _error_event_cb_arg = arg;
-    }
-
-    void setCloseError(err_t e) {
-      if(_errored == EE_OK)
-        _close_error = e;
-    }
-    err_t getCloseError(void) const {
-      return _close_error;
-    }
-    /**
-     * Called mainly by callback routines, called when err is not ERR_OK.
-     * This prevents the possiblity of aborting an already errored out
-     * connection.
-     */
-    void setErrored(size_t errorEvent) {
-      if(EE_OK == _errored)
-        _errored = errorEvent;
-      if (_error_event_cb)
-        _error_event_cb(_error_event_cb_arg, errorEvent);
-    }
-    /* *
-     * Used by callback functions only. Used for proper ERR_ABRT return value
-     * reporting. ERR_ABRT is only reported/returned once; thereafter ERR_OK
-     * is always returned.
-     */
-    err_t getCallbackCloseError(void) {
-      if (EE_OK != _errored)
-        return ERR_OK;
-      if (ERR_ABRT == _close_error)
-        setErrored(EE_ABORTED);
-      return _close_error;
-    }
-
-    void closed(void) {
-      if (_client)
-        _client = NULL;
-    }
+    err_t getCloseError(void) const { return _close_error;}
     bool hasClient(void) const { return (_client != NULL);}
+    ACErrorTracker(AsyncClient *c);
     ~ACErrorTracker() {}
 };
 
 class AsyncClient {
   protected:
     friend class AsyncTCPbuffer;
+    friend class AsyncServer;
     tcp_pcb* _pcb;
     AcConnectHandler _connect_cb;
     void* _connect_cb_arg;
@@ -207,6 +164,8 @@ class AsyncClient {
     static void _s_handshake(void *arg, struct tcp_pcb *tcp, SSL *ssl);
     static void _s_ssl_error(void *arg, struct tcp_pcb *tcp, int8_t err);
 #endif
+    std::shared_ptr<ACErrorTracker> getACErrorTracker(void) const { return _errorTacker; };
+    void setCloseError(err_t e) const { _errorTacker->setCloseError(e);}
 
   public:
     AsyncClient* prev;
@@ -288,13 +247,11 @@ class AsyncClient {
     void onPoll(AcConnectHandler cb, void* arg = 0);        //every 125ms when connected
     void ackPacket(struct pbuf * pb);
 
-    const char * errorToString(int8_t error);
+    const char * errorToString(err_t error);
     const char * stateToString();
 
     void _recv(std::shared_ptr<ACErrorTracker>& closeAbort, tcp_pcb* pcb, pbuf* pb, err_t err);
-    void setCloseError(err_t e) const { _errorTacker->setCloseError(e);}
     err_t getCloseError(void) const { return _errorTacker->getCloseError();}
-    std::shared_ptr<ACErrorTracker> getACErrorTracker(void) const { return _errorTacker; };
 };
 
 #if ASYNC_TCP_SSL_ENABLED
@@ -316,7 +273,9 @@ class AsyncServer {
     AcSSlFileHandler _file_cb;
     void* _file_cb_arg;
 #endif
+#ifdef DEBUG_MORE
     int _event_count[EE_MAX];
+#endif
 
   public:
 
@@ -333,13 +292,15 @@ class AsyncServer {
     void setNoDelay(bool nodelay);
     bool getNoDelay();
     uint8_t status();
-
-    int incEventCount(size_t ee) { return ++_event_count[ee];}
-    int getEventCount(size_t ee) { return _event_count[ee];}
-
+#ifdef DEBUG_MORE
+    int getEventCount(size_t ee) const { return _event_count[ee];}
+#endif
   protected:
     err_t _accept(tcp_pcb* newpcb, err_t err);
     static err_t _s_accept(void *arg, tcp_pcb* newpcb, err_t err);
+#ifdef DEBUG_MORE
+    int incEventCount(size_t ee) { return ++_event_count[ee];}
+#endif
 #if ASYNC_TCP_SSL_ENABLED
     int _cert(const char *filename, uint8_t **buf);
     err_t _poll(tcp_pcb* pcb);

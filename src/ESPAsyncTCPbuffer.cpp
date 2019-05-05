@@ -147,9 +147,11 @@ size_t AsyncTCPbuffer::write(const uint8_t *data, size_t len) {
  */
 void AsyncTCPbuffer::flush() {
     while(!_TXbufferWrite->empty()) {
-        while(!_client->canSend()) {
+        while(connected() && !_client->canSend()) {
             delay(0);
         }
+        if(!connected())
+          return;
         _sendBuffer();
     }
 }

@@ -18,17 +18,19 @@
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
-// #include "SyncClient.h"
-// #include "Arduino.h"
-// #include "ESPAsyncTCP.h"
-
 #include "Arduino.h"
-#include "ESPAsyncTCP.h"
 #include "SyncClient.h"
-
-
+#include "ESPAsyncTCP.h"
 #include "cbuf.h"
 #include <interrupts.h>
+
+#define DEBUG_ESP_SYNC_CLIENT
+#if defined(DEBUG_ESP_SYNC_CLIENT) && !defined(SYNC_CLIENT_DEBUG)
+#define SYNC_CLIENT_DEBUG( format, ...) DEBUG_GENERIC_P("[SYNC_CLIENT]", format, ##__VA_ARGS__)
+#endif
+#ifndef SYNC_CLIENT_DEBUG
+#define SYNC_CLIENT_DEBUG(...) do { (void)0;} while(false)
+#endif
 
 /*
   Without LWIP_NETIF_TX_SINGLE_PBUF, all tcp_writes default to "no copy".
@@ -55,14 +57,21 @@ SyncClient::SyncClient(AsyncClient *client, size_t txBufLen)
   , _rx_buffer(NULL)
   , _ref(NULL)
 {
-  if(ref() > 0 && _client != NULL) // Added NULL check before call. SEP 30 2017 - mjh
+  if(ref() > 0 && _client != NULL)
     _attachCallbacks();
+}
+
+SyncClient::~SyncClient(){
+  if (0 == unref())
+    _release();
 }
 
 void SyncClient::_release(){
   if(_client != NULL){
+    _client->onData(NULL, NULL);
+    _client->onAck(NULL, NULL);
+    _client->onPoll(NULL, NULL);
     _client->abort();
-    _client->free();
     _client = NULL;
   }
   if(_tx_buffer != NULL){
@@ -76,7 +85,7 @@ void SyncClient::_release(){
     delete b;
   }
 }
-#if 1
+
 int SyncClient::ref(){
   if(_ref == NULL){
     _ref = new int;
@@ -99,39 +108,11 @@ int SyncClient::unref(){
   }
   return count;
 }
-#else
-void SyncClient::ref() {
-  if (_ref == NULL) {
-    _ref = new size_t;
-    *_ref = 0;
-  }
-  ++*_ref;
-}
 
-size_t SyncClient::unref() {
-  size_t count = 0;
-  if (_ref) {
-    count = --*_ref;
-    if (0 == count) {
-      delete _ref;
-      _ref = NULL;
-    }
-  }
-  return count;
-}
-#endif
-SyncClient::~SyncClient(){
-  if (0 == unref())
-    _release();
-}
 #if ASYNC_TCP_SSL_ENABLED
-int SyncClient::connect(CONST IPAddress& ip, uint16_t port, bool secure){
+int SyncClient::_connect(const IPAddress& ip, uint16_t port, bool secure){
 #else
-#ifdef ARDUINO_ESP8266_RELEASE_2_5_0
-int SyncClient::connect(CONST IPAddress& ip, uint16_t port){
-#else
-int SyncClient::connect(IPAddress ip, uint16_t port){
-#endif
+int SyncClient::_connect(const IPAddress& ip, uint16_t port){
 #endif
   if(_client != NULL){
     if(connected())
@@ -183,7 +164,35 @@ int SyncClient::connect(const char *host, uint16_t port){
   }
   return 0;
 }
-#if 1
+//#define REVERT_OPERATOR_EQUAL
+#ifdef REVERT_OPERATOR_EQUAL
+SyncClient & SyncClient::operator=(const SyncClient &other){
+  if(_client != NULL){
+    _client->abort();
+    _client->free();
+    _client = NULL;
+  }
+  _tx_buffer_size = other._tx_buffer_size;
+  if(_tx_buffer != NULL){
+    cbuf *b = _tx_buffer;
+    _tx_buffer = NULL;
+    delete b;
+  }
+  while(_rx_buffer != NULL){
+    cbuf *b = _rx_buffer;
+    _rx_buffer = b->next;
+    delete b;
+  }
+  if(other._client != NULL)
+    _tx_buffer = new cbuf(other._tx_buffer_size);
+
+  _client = other._client;
+  if(_client)
+    _attachCallbacks();
+
+  return *this;
+}
+#else
 SyncClient & SyncClient::operator=(const SyncClient &other){
   //mjh - This can be simplified. Fear of a callback while processing should
   // not happen in this cooperative yield construct. Since we are not calling
@@ -212,43 +221,11 @@ SyncClient & SyncClient::operator=(const SyncClient &other){
 
   // This operation must be atomic - cannot have callback on receive while transfering
   // the rx buffer before callbacks are updated.
-  // ets_intr_lock();
   {
     AutoInterruptLock(15);
     _rx_buffer = other._rx_buffer;
     if(_client)
       _attachCallbacks();
-  }
-  // ets_intr_unlock();
-  return *this;
-}
-#else
-SyncClient & SyncClient::operator=(const SyncClient &other){
-  if(_client != NULL){
-    _client->abort();
-    _client->free();
-    _client = NULL;
-  }
-  _tx_buffer_size = other._tx_buffer_size;
-  if(_tx_buffer != NULL){
-    cbuf *b = _tx_buffer;
-    _tx_buffer = NULL;
-    delete b;
-  }
-  while(_rx_buffer != NULL){
-    cbuf *b = _rx_buffer;
-    _rx_buffer = b->next;
-    delete b;
-  }
-  if(other._client != NULL) //Added
-  _tx_buffer = new cbuf(other._tx_buffer_size);
-  _client = other._client;
-
-  if(_client) // Added NULL check before call. SEP 30 2017 - mjh
-    _attachCallbacks();
-  if (_client) {
-    Serial.println("SyncClient & SyncClient::operator=(const SyncClient &other); - called");
-    Serial.flush();
   }
   return *this;
 }
@@ -269,7 +246,6 @@ uint8_t SyncClient::connected(){
   return (_client != NULL && _client->connected());
 }
 
-//void SyncClient::stop(){
 bool SyncClient::stop(unsigned int maxWaitMs){
   (void)maxWaitMs;
   if(_client != NULL)
@@ -368,15 +344,15 @@ size_t SyncClient::write(const uint8_t *data, size_t len){
   while(_tx_buffer->room() < toSend){
     toWrite = _tx_buffer->room();
     _tx_buffer->write((const char*)data, toWrite);
-    while(_client != NULL && !_client->canSend() && connected())
+    while(connected() && !_client->canSend())
       delay(0);
-    if(_client == NULL || _tx_buffer == NULL)
+    if(!connected()) //_client == NULL || _tx_buffer == NULL)
       return 0;
     _sendBuffer();
     toSend -= toWrite;
   }
   _tx_buffer->write((const char*)(data+(len - toSend)), toSend);
-  if(_client->canSend() && connected())
+  if(connected() && _client->canSend())
     _sendBuffer();
   return len;
 }
@@ -424,11 +400,8 @@ int SyncClient::read(){
   return res;
 }
 
-// #if LWIP_IPV6_NUM_ADDRESSES == 0
-// bool SyncClient::_flush(unsigned int maxWaitMs){
-// #else
 bool SyncClient::flush(unsigned int maxWaitMs){
-// #endif
+  (void)maxWaitMs;
   if(_tx_buffer == NULL || !connected())
     return false;
   if(_tx_buffer->available()){

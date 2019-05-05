@@ -66,7 +66,7 @@ int AsyncPrinter::connect(IPAddress ip, uint16_t port){
   _client = new AsyncClient();
   _client->onConnect([](void *obj, AsyncClient *c){ ((AsyncPrinter*)(obj))->_onConnect(c); }, this);
   if(_client->connect(ip, port)){
-    while(_client->state() < 4)
+    while(_client && _client->state() < 4)
       delay(1);
     return connected();
   }
@@ -79,7 +79,7 @@ int AsyncPrinter::connect(const char *host, uint16_t port){
   _client = new AsyncClient();
   _client->onConnect([](void *obj, AsyncClient *c){ ((AsyncPrinter*)(obj))->_onConnect(c); }, this);
   if(_client->connect(host, port)){
-    while(_client->state() < 4)
+    while(_client && _client->state() < 4)
       delay(1);
     return connected();
   }
@@ -127,13 +127,16 @@ size_t AsyncPrinter::write(const uint8_t *data, size_t len){
   while(_tx_buffer->room() < toSend){
     toWrite = _tx_buffer->room();
     _tx_buffer->write((const char*)data, toWrite);
-    while(!_client->canSend())
+    while(connected() && !_client->canSend())
       delay(0);
+    if(!connected())
+      return 0; // or len - toSend;
     _sendBuffer();
     toSend -= toWrite;
   }
   _tx_buffer->write((const char*)(data+(len - toSend)), toSend);
-  while(!_client->canSend()) delay(0);
+  while(connected() && !_client->canSend()) delay(0);
+  if(!connected()) return 0; // or len - toSend;
   _sendBuffer();
   return len;
 }
