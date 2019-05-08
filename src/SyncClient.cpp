@@ -194,24 +194,13 @@ SyncClient & SyncClient::operator=(const SyncClient &other){
 }
 #else
 SyncClient & SyncClient::operator=(const SyncClient &other){
-  //mjh - This can be simplified. Fear of a callback while processing should
-  // not happen in this cooperative yield construct. Since we are not calling
-  // on services that would call yield, we should be safe!?
   int *rhsref = other._ref;
-  ++*rhsref; // Just in case the left and right size are the same object with different containers
+  ++*rhsref; // Just in case the left and right side are the same object with different containers
   if (0 == unref())
     _release();
   _ref = other._ref;
   ref();
   --*rhsref;
-
- // I am not convensed that this is safe - if the left side and the right side are
- // separate copies of the same object they can get out of sync. And leaks may happen.
- // If they reference the same object everything is OK.
- //
- // I am thinking that SyncClient needs to be encapsulated in a holding object that
- // uses a pointer to SyncClient so that all network actions go against a single object.
- // Event when performed from multiple holding objects.
 
   _tx_buffer_size = other._tx_buffer_size;
   _tx_buffer = other._tx_buffer;
@@ -219,14 +208,9 @@ SyncClient & SyncClient::operator=(const SyncClient &other){
   if (_client != NULL && _tx_buffer == NULL)
     _tx_buffer = new cbuf(_tx_buffer_size);
 
-  // This operation must be atomic - cannot have callback on receive while transfering
-  // the rx buffer before callbacks are updated.
-  {
-    AutoInterruptLock(15);
-    _rx_buffer = other._rx_buffer;
-    if(_client)
-      _attachCallbacks();
-  }
+  _rx_buffer = other._rx_buffer;
+  if(_client)
+    _attachCallbacks();
   return *this;
 }
 #endif
